@@ -15,6 +15,7 @@ from core.input import InputAdapter
 from core.logger import create_logger
 from modules.antiafk import AntiAfkTask, PATTERNS
 from modules.macro import MacroTask, parse_script
+from modules.vision_task import VisionMonitorTask
 from vision.matcher import TemplateMatcher
 
 
@@ -40,6 +41,17 @@ QProgressBar::chunk { background:#3976d6; border-radius:5px; }
 
 
 ASSET_DIR = Path(__file__).resolve().parent / "assets" / "templates"
+ASSET_GROUPS = {
+    "cook": ("🍳 Готовка", "Ингредиенты, инструменты и кнопка запуска рецепта"),
+    "cow": ("🐄 Ферма: коровы", "Подсказки направления и автоматическое действие"),
+    "gym": ("🏋 Качалка", "Старт, успех и ошибка упражнения"),
+    "heal": ("🏥 Медицина", "Символы и предметы лечебной мини‑игры"),
+    "relogin": ("🔄 Переподключение", "Состояния подключения и повторного входа"),
+    "shveika": ("🧵 Швейка", "Последовательность из 20 точек и состояния мини‑игры"),
+    "spin": ("🎰 Казино", "Элементы колеса и кнопка запуска"),
+    "stroyka": ("🏗 Стройка", "Картинки строительной мини‑игры"),
+    "tokar": ("🔧 Токарь", "Шаблоны инструмента и рабочего элемента"),
+}
 
 
 class VisionScanThread(QtCore.QThread):
@@ -92,6 +104,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.log = create_logger()
         self.input = InputAdapter(self.settings.dry_run, self.settings.key_delay, self.settings.click_pause)
         self.task = None
+        self.vision_thread = None
         self.started = None
         self._build()
         self.write("Готово. Безопасный режим включён по умолчанию.")
@@ -112,7 +125,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pages = QtWidgets.QStackedWidget()
         group = QtWidgets.QButtonGroup(self)
         group.setExclusive(True)
-        for label, index in (("Обзор", 0), ("Anti‑AFK", 1), ("Сценарии", 2), ("Распознавание", 3), ("Настройки", 4)):
+        for label, index in (("⌂  Обзор", 0), ("◌  Anti‑AFK", 1), ("☷  Сценарии", 2), ("◈  Мини‑игры", 3), ("⚙  Настройки", 4)):
             button = QtWidgets.QPushButton(label, objectName="nav")
             button.setCheckable(True)
             button.clicked.connect(lambda checked, i=index: self.pages.setCurrentIndex(i))
@@ -222,33 +235,54 @@ class MainWindow(QtWidgets.QMainWindow):
         return page
 
     def vision_page(self) -> QtWidgets.QWidget:
-        page, layout = self.page("Распознавание картинок", "Проверка шаблонов на текущем экране через OpenCV.")
-        card = Card("Шаблон мини‑игры", "Выбери категорию и изображение из assets/templates, затем нажми «Проверить экран».")
+        page, layout = self.page("Мини‑игры", "Выбери понятную категорию, проверь картинку и при необходимости запусти мониторинг.")
+        card = Card("Шаблон мини‑игры", "Категории уже собраны по назначению. Сначала нажми «Проверить экран», затем запускай мониторинг.")
         form = QtWidgets.QFormLayout()
         self.asset_group = QtWidgets.QComboBox()
+        self.asset_group.setMinimumWidth(270)
         self.asset_image = QtWidgets.QComboBox()
+        self.asset_image.setMinimumWidth(270)
         self.vision_threshold = QtWidgets.QDoubleSpinBox(minimum=0.50, maximum=0.99, singleStep=0.01, value=0.88)
         self.vision_threshold.setSuffix(" порог")
+        self.vision_interval = QtWidgets.QDoubleSpinBox(minimum=0.05, maximum=5.0, singleStep=0.05, value=0.20, suffix=" с")
+        self.vision_action = QtWidgets.QComboBox()
+        self.vision_action.addItem("Только журнал", "none")
+        self.vision_action.addItem("Нажать клавишу", "key")
+        self.vision_action.addItem("Кликнуть по центру", "click")
+        self.vision_key = QtWidgets.QLineEdit()
+        self.vision_key.setPlaceholderText("например: e или space")
+        self.vision_hint = QtWidgets.QLabel(objectName="muted")
+        self.vision_hint.setWordWrap(True)
         form.addRow("Категория", self.asset_group)
         form.addRow("Картинка", self.asset_image)
         form.addRow("Точность", self.vision_threshold)
+        form.addRow("Проверять каждые", self.vision_interval)
+        form.addRow("Действие", self.vision_action)
+        form.addRow("Клавиша", self.vision_key)
         card.layout.addLayout(form)
         actions = QtWidgets.QHBoxLayout()
         refresh = QtWidgets.QPushButton("Обновить список")
         scan = QtWidgets.QPushButton("Проверить экран", objectName="primary")
+        start = QtWidgets.QPushButton("Запустить мониторинг", objectName="primary")
+        stop = QtWidgets.QPushButton("Остановить", objectName="danger")
         refresh.clicked.connect(self.refresh_asset_list)
         self.asset_group.currentTextChanged.connect(self.refresh_asset_images)
         scan.clicked.connect(self.scan_screen)
+        start.clicked.connect(self.start_vision_monitor)
+        stop.clicked.connect(self.stop_vision_monitor)
         actions.addWidget(refresh)
         actions.addWidget(scan)
+        actions.addWidget(start)
+        actions.addWidget(stop)
         card.layout.addLayout(actions)
         self.vision_status = QtWidgets.QLabel("Шаблоны ещё не проверялись", objectName="muted")
         self.vision_status.setWordWrap(True)
         card.layout.addWidget(self.vision_status)
+        card.layout.addWidget(self.vision_hint)
         layout.addWidget(card)
         self.refresh_asset_list()
         note = QtWidgets.QLabel(
-            "Результат только записывается в журнал. Автоматический клик по найденной картинке здесь не выполняется.",
+            "В безопасном режиме действия только записываются в журнал. Для реального ввода сначала проверь совпадение, затем отключи безопасный режим в настройках.",
             objectName="muted",
         )
         note.setWordWrap(True)
@@ -256,16 +290,47 @@ class MainWindow(QtWidgets.QMainWindow):
         layout.addStretch()
         return page
 
+    def start_vision_monitor(self) -> None:
+        group_name = self.asset_group.currentData()
+        if not group_name or not self.asset_image.currentText():
+            self.vision_status.setText("Сначала выбери шаблон.")
+            return
+        self.stop()
+        path = ASSET_DIR / group_name / self.asset_image.currentText()
+        self.vision_thread = VisionMonitorTask(
+            self.input,
+            path,
+            self.vision_threshold.value(),
+            self.vision_interval.value(),
+            self.vision_action.currentData(),
+            self.vision_key.text(),
+            self.write,
+        )
+        self.vision_thread.start()
+        self.task = self.vision_thread
+        self.set_running("Распознавание")
+        self.vision_status.setText("Мониторинг запущен. Смотри журнал ниже на вкладке «Обзор».")
+
+    def stop_vision_monitor(self) -> None:
+        if self.vision_thread:
+            self.vision_thread.stop()
+            self.vision_thread = None
+        if self.task and self.task.name == "Распознавание":
+            self.task = None
+            self.set_running(None)
+
     def refresh_asset_list(self) -> None:
         if not hasattr(self, "asset_group"):
             return
-        current_group = self.asset_group.currentText()
+        current_group = self.asset_group.currentData()
         self.asset_group.blockSignals(True)
         self.asset_group.clear()
         groups = sorted(path.name for path in ASSET_DIR.iterdir() if path.is_dir()) if ASSET_DIR.exists() else []
-        self.asset_group.addItems(groups)
+        for group in groups:
+            label, _ = ASSET_GROUPS.get(group, (group.title(), ""))
+            self.asset_group.addItem(label, group)
         if current_group in groups:
-            self.asset_group.setCurrentText(current_group)
+            self.asset_group.setCurrentIndex(groups.index(current_group))
         self.asset_group.blockSignals(False)
         self.refresh_asset_images()
 
@@ -273,17 +338,20 @@ class MainWindow(QtWidgets.QMainWindow):
         if not hasattr(self, "asset_image"):
             return
         self.asset_image.clear()
-        group = ASSET_DIR / self.asset_group.currentText()
+        group_name = self.asset_group.currentData()
+        group = ASSET_DIR / group_name if group_name else Path()
         if group.exists():
             self.asset_image.addItems(sorted(path.name for path in group.iterdir() if path.suffix.lower() in {".png", ".jpg", ".jpeg"}))
+        self.vision_hint.setText(ASSET_GROUPS.get(group_name, ("", ""))[1])
 
     def scan_screen(self) -> None:
-        if not self.asset_group.currentText() or not self.asset_image.currentText():
+        group_name = self.asset_group.currentData()
+        if not group_name or not self.asset_image.currentText():
             self.vision_status.setText("В assets/templates пока нет шаблонов. Добавь картинки и нажми «Обновить список».")
             return
         if getattr(self, "vision_thread", None) and self.vision_thread.isRunning():
             return
-        path = ASSET_DIR / self.asset_group.currentText() / self.asset_image.currentText()
+        path = ASSET_DIR / group_name / self.asset_image.currentText()
         self.vision_status.setText(f"Сканирую экран по шаблону {path.name}…")
         self.vision_thread = VisionScanThread(path, self.vision_threshold.value())
         self.vision_thread.result.connect(self.on_vision_result)
@@ -365,8 +433,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop()
-        if getattr(self, "vision_thread", None) and self.vision_thread.isRunning():
-            self.vision_thread.wait(1500)
+        self.stop_vision_monitor()
         event.accept()
 
 
