@@ -210,7 +210,8 @@ class MainWindow(QtWidgets.QMainWindow):
         self.pattern = QtWidgets.QComboBox()
         for key, (label, detail) in PATTERN_LABELS.items():
             self.pattern.addItem(f"{label} · {detail}", key)
-        self.pattern.setCurrentIndex(max(0, list(PATTERN_LABELS).index(self.settings.anti_afk_pattern)))
+        pattern_keys = list(PATTERN_LABELS)
+        self.pattern.setCurrentIndex(pattern_keys.index(self.settings.anti_afk_pattern) if self.settings.anti_afk_pattern in pattern_keys else 0)
         form.addRow("Пауза между циклами", self.interval)
         form.addRow("Рисунок движения", self.pattern)
         card.layout.addLayout(form)
