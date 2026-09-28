@@ -52,6 +52,16 @@ ASSET_GROUPS = {
     "stroyka": ("🏗 Стройка", "Картинки строительной мини‑игры"),
     "tokar": ("🔧 Токарь", "Шаблоны инструмента и рабочего элемента"),
 }
+PATTERN_LABELS = {
+    "gentle": ("Мягкое движение", "A → D → W → S"),
+    "walk": ("Прогулка вперёд/назад", "W → S"),
+    "turn": ("Повороты", "A → D"),
+}
+SCRIPT_PRESETS = {
+    "Проверка клавиш": "# безопасный пример\ntap f\nwait 0.5\ntap space",
+    "Мягкое движение": "hold a 0.45\nhold d 0.45\nhold w 0.35\nhold s 0.35",
+    "Открыть и подтвердить": "tap e\nwait 0.7\ntap enter",
+}
 
 
 class VisionScanThread(QtCore.QThread):
@@ -95,6 +105,8 @@ class Card(QtWidgets.QFrame):
 
 
 class MainWindow(QtWidgets.QMainWindow):
+    hotkey_signal = QtCore.Signal()
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("RP Automation — самостоятельный помощник")
@@ -105,8 +117,12 @@ class MainWindow(QtWidgets.QMainWindow):
         self.input = InputAdapter(self.settings.dry_run, self.settings.key_delay, self.settings.click_pause)
         self.task = None
         self.vision_thread = None
+        self._keyboard = None
+        self._hotkey_handle = None
         self.started = None
         self._build()
+        self.hotkey_signal.connect(self.stop)
+        self.register_global_hotkey()
         self.write("Готово. Безопасный режим включён по умолчанию.")
         QtCore.QTimer.singleShot(400, self.refresh_status)
 
@@ -154,10 +170,10 @@ class MainWindow(QtWidgets.QMainWindow):
         return widget, layout
 
     def overview(self) -> QtWidgets.QWidget:
-        page, layout = self.page("Панель управления", "Общие состояние, журнал и безопасный контроль модулей.")
+        page, layout = self.page("Панель управления", "Быстрый запуск, состояние модулей и единая остановка.")
         row = QtWidgets.QHBoxLayout()
         self.state_value = QtWidgets.QLabel("Остановлено")
-        self.mode_value = QtWidgets.QLabel("Проверка без ввода")
+        self.mode_value = QtWidgets.QLabel("Проверка без ввода" if self.settings.dry_run else "Реальный ввод")
         self.time_value = QtWidgets.QLabel("—")
         for title, value in (("Состояние", self.state_value), ("Режим", self.mode_value), ("Сессия", self.time_value)):
             card = Card(title)
@@ -165,6 +181,21 @@ class MainWindow(QtWidgets.QMainWindow):
             card.layout.addWidget(value)
             row.addWidget(card)
         layout.addLayout(row)
+        quick = Card("Быстрые действия", "Запускай только один модуль за раз. F8 всегда останавливает активный модуль.")
+        quick_row = QtWidgets.QHBoxLayout()
+        mini_games = QtWidgets.QPushButton("Открыть мини‑игры")
+        anti_afk = QtWidgets.QPushButton("Запустить Anti‑AFK", objectName="primary")
+        stop_all = QtWidgets.QPushButton("Остановить всё", objectName="danger")
+        mini_games.clicked.connect(lambda: self.pages.setCurrentIndex(3))
+        anti_afk.clicked.connect(self.start_afk)
+        stop_all.clicked.connect(self.stop)
+        quick_row.addWidget(mini_games)
+        quick_row.addWidget(anti_afk)
+        quick_row.addWidget(stop_all)
+        quick.layout.addLayout(quick_row)
+        layout.addWidget(quick)
+        guide = Card("Быстрый старт", "1) Оставь безопасный режим.  2) Проверь шаблон на вкладке «Мини‑игры».  3) Только после этого включай реальный ввод в настройках.")
+        layout.addWidget(guide)
         card = Card("Журнал", "Подробный файл: logs/automation.log")
         self.output = QtWidgets.QPlainTextEdit(readOnly=True)
         card.layout.addWidget(self.output)
@@ -177,8 +208,9 @@ class MainWindow(QtWidgets.QMainWindow):
         form = QtWidgets.QFormLayout()
         self.interval = QtWidgets.QDoubleSpinBox(minimum=5, maximum=3600, value=self.settings.anti_afk_interval, suffix=" с")
         self.pattern = QtWidgets.QComboBox()
-        self.pattern.addItems(list(PATTERNS))
-        self.pattern.setCurrentText(self.settings.anti_afk_pattern)
+        for key, (label, detail) in PATTERN_LABELS.items():
+            self.pattern.addItem(f"{label} · {detail}", key)
+        self.pattern.setCurrentIndex(max(0, list(PATTERN_LABELS).index(self.settings.anti_afk_pattern)))
         form.addRow("Пауза между циклами", self.interval)
         form.addRow("Рисунок движения", self.pattern)
         card.layout.addLayout(form)
@@ -197,10 +229,19 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def script_page(self) -> QtWidgets.QWidget:
         page, layout = self.page("Сценарии", "Свои последовательности действий без правки исходников.")
-        card = Card("Редактор", "Команды: tap KEY, hold KEY SEC, wait SEC.")
+        card = Card("Редактор", "Команды: tap KEY, hold KEY SEC, wait SEC. Можно начать с готового пресета.")
         self.script = QtWidgets.QPlainTextEdit("# пример\ntap f\nwait 0.5\nhold w 1.2\ntap space")
         card.layout.addWidget(self.script, 1)
         line = QtWidgets.QHBoxLayout()
+        self.preset = QtWidgets.QComboBox()
+        self.preset.addItem("Выбрать пресет…", "")
+        for name, script in SCRIPT_PRESETS.items():
+            self.preset.addItem(name, script)
+        load_preset = QtWidgets.QPushButton("Загрузить")
+        load_preset.clicked.connect(lambda: self.script.setPlainText(self.preset.currentData() or self.script.toPlainText()))
+        line.addWidget(self.preset)
+        line.addWidget(load_preset)
+        line.addSpacing(12)
         self.repeat = QtWidgets.QSpinBox(minimum=1, maximum=999, value=1)
         line.addWidget(QtWidgets.QLabel("Повторы:"))
         line.addWidget(self.repeat)
@@ -216,14 +257,20 @@ class MainWindow(QtWidgets.QMainWindow):
         return page
 
     def settings_page(self) -> QtWidgets.QWidget:
-        page, layout = self.page("Настройки", "Файл конфигурации создаётся рядом с приложением.")
+        page, layout = self.page("Настройки", "Безопасность, горячая клавиша и задержки ввода.")
         card = Card("Режим ввода")
         form = QtWidgets.QFormLayout()
         self.dry = QtWidgets.QCheckBox("Только журналировать действия")
         self.dry.setChecked(self.settings.dry_run)
+        self.hotkey_enabled = QtWidgets.QCheckBox("Включить глобальную клавишу остановки")
+        self.hotkey_enabled.setChecked(bool(getattr(self.settings, "hotkey_enabled", False)))
+        self.hotkey = QtWidgets.QLineEdit(getattr(self.settings, "global_hotkey", "f8"))
+        self.hotkey.setMaximumWidth(160)
         self.delay = QtWidgets.QDoubleSpinBox(minimum=0, maximum=2, singleStep=0.01, value=self.settings.key_delay, suffix=" с")
         self.pause = QtWidgets.QDoubleSpinBox(minimum=0, maximum=2, singleStep=0.01, value=self.settings.click_pause, suffix=" с")
         form.addRow(self.dry)
+        form.addRow(self.hotkey_enabled)
+        form.addRow("Клавиша остановки", self.hotkey)
         form.addRow("Задержка клавиш", self.delay)
         form.addRow("Пауза клика", self.pause)
         card.layout.addLayout(form)
@@ -396,7 +443,7 @@ class MainWindow(QtWidgets.QMainWindow):
 
     def start_afk(self) -> None:
         self.stop()
-        self.task = AntiAfkTask(self.input, self.interval.value(), self.pattern.currentText(), self.write)
+        self.task = AntiAfkTask(self.input, self.interval.value(), self.pattern.currentData(), self.write)
         self.task.start()
         self.set_running("Anti‑AFK")
 
@@ -424,16 +471,48 @@ class MainWindow(QtWidgets.QMainWindow):
         self.settings.dry_run = self.dry.isChecked()
         self.settings.key_delay = self.delay.value()
         self.settings.click_pause = self.pause.value()
+        self.settings.anti_afk_interval = self.interval.value()
+        self.settings.anti_afk_pattern = self.pattern.currentData()
+        self.settings.global_hotkey = self.hotkey.text().strip() or "f8"
+        self.settings.hotkey_enabled = self.hotkey_enabled.isChecked()
         self.store.save(self.settings)
         self.input.dry_run = self.settings.dry_run
         self.input.key_delay = self.settings.key_delay
         self.input.click_pause = self.settings.click_pause
         self.mode_value.setText("Проверка без ввода" if self.settings.dry_run else "Реальный ввод")
+        self.register_global_hotkey()
         self.write("Настройки сохранены")
+
+    def register_global_hotkey(self) -> None:
+        if self._keyboard is not None and self._hotkey_handle is not None:
+            try:
+                self._keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
+            self._hotkey_handle = None
+        if not getattr(self.settings, "hotkey_enabled", False):
+            return
+        try:
+            import keyboard
+
+            self._keyboard = keyboard
+            self._hotkey_handle = keyboard.add_hotkey(
+                getattr(self.settings, "global_hotkey", "f8"),
+                lambda: self.hotkey_signal.emit(),
+            )
+            self.write(f"Глобальная остановка: {self.settings.global_hotkey}")
+        except Exception as exc:
+            self._keyboard = None
+            self.write(f"Не удалось включить глобальную клавишу: {exc}")
 
     def closeEvent(self, event: QtGui.QCloseEvent) -> None:
         self.stop()
         self.stop_vision_monitor()
+        if self._keyboard is not None and self._hotkey_handle is not None:
+            try:
+                self._keyboard.remove_hotkey(self._hotkey_handle)
+            except Exception:
+                pass
         event.accept()
 
 

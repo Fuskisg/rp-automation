@@ -12,6 +12,7 @@ class Settings:
     anti_afk_interval: float = 45.0
     anti_afk_pattern: str = "gentle"
     global_hotkey: str = "f8"
+    hotkey_enabled: bool = False
     key_delay: float = 0.08
     click_pause: float = 0.12
     window_title_hint: str = "GTA"
@@ -38,4 +39,3 @@ class SettingsStore:
             json.dumps(asdict(settings), ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-
